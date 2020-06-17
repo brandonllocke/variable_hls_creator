@@ -1,4 +1,5 @@
 import argparse
+import faster_than_walk
 import os
 
 from ffmpy import FFmpeg
@@ -115,7 +116,6 @@ class Convert:
             f"-hls_time 10 -hls_list_size 0 -f hls"
             )
 
-
     @property
     def _conversion_dir(self):
         con_dir = str(self.file.path.split(
@@ -157,10 +157,10 @@ class Convert:
             if (height <= self.file.height) and (
                     bitrate <= self.file.vbitrate):
                 this_stream_bitrate = (
-                        f"-b:v:{var_num} {bitrate} -s:v:{var_num} "
-                        f"{int(height * 1.77777777777777777777777777777)}"
-                        f"x{height} -c:v:{var_num} libx264"
-                        )
+                    f"-b:v:{var_num} {bitrate} -s:v:{var_num} "
+                    f"{int(height * 1.77777777777777777777777777777)}"
+                    f"x{height} -c:v:{var_num} libx264"
+                    )
                 this_stream_map = f"v:{var_num},a:{var_num},name:{variant}"
                 this_map = f"-map 0:v -map 0:a"
                 variant_stream_bitrates.append(this_stream_bitrate)
@@ -189,8 +189,17 @@ class Convert:
         return True
 
 class Directory:
-    def __init__(self):
-        pass
+    def __init__(self, path):
+        self.path = path
+        self.files = self._parse_files()
+
+    def _parse_files(self):
+        files = []
+        for file in faster_than_walk.walk(str(self.path)):
+            file = File(file)
+            if file.is_a_video_file:
+                files.append(file)
+        return files
 
 class FilePath:
     def __init__(self, arg):
@@ -227,10 +236,18 @@ def main():
                         help='''Built variant ladder to use. Defaults to Apple.''')
     args = parser.parse_args()
     path = FilePath(args.path)
+    if args.variant_ladder is None:
+        args.variant_ladder = 'apple'
     if path.is_dir and path.exists and args.recursive:
-        print('Is a dir')
+        directory = Directory(path.absolute)
+        for file in directory.files:
+            Convert(file, single=args.single_version, schema=args.variant_ladder)
     elif path.is_file and path.exists:
-        Convert(File(path.absolute), single=args.single_version, schema=args.variant_ladder)
+        file = File(path.absolute)
+        if file.is_a_video_file:
+            Convert(file, single=args.single_version, schema=args.variant_ladder)
+        else:
+            print('This isn\'t a supported video type.')
     else:
         print('Either the file/directory doesn\'t exist or a directory'
               ' was called without the "-r/--recursive" flag.')
