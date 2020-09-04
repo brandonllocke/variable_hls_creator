@@ -13,6 +13,7 @@ class File:
         self.name, self.ext = os.path.splitext(self.basename)
         self._video_track = None
         self._audio_track = None
+        self._general_info = None
 
     def _parse_track(self, kind, attribute):
         media_info = MediaInfo.parse(self.path)
@@ -23,16 +24,20 @@ class File:
     def _get_video_attribute(self, kind):
         if self._video_track is not None:
             return self._video_track.get(kind, None)
-        else:
-            self._parse_track('Video', '_video_track')
-            return self._get_video_attribute(kind)
+        self._parse_track('Video', '_video_track')
+        return self._get_video_attribute(kind)
 
     def _get_audio_attribute(self, kind):
         if self._audio_track is not None:
             return self._audio_track.get(kind, None)
-        else:
-            self._parse_track('Audio', '_audio_track')
-            return self._get_audio_attribute(kind)
+        self._parse_track('Audio', '_audio_track')
+        return self._get_audio_attribute(kind)
+
+    def _get_general_attribute(self, kind):
+        if self._general_info is not None:
+            return self._general_info.get(kind, None)
+        self._parse_track('General', '_general_info')
+        return self._get_general_attribute(kind)
 
     @property
     def is_a_video_file(self):
@@ -47,22 +52,30 @@ class File:
         return self._get_video_attribute('height')
 
     @property
-    def width(self):
-        return self._get_video_attribute('width')
-
-    @property
     def vbitrate(self):
         nominal_bit_rate = self._get_video_attribute('nominal_bit_rate')
         if nominal_bit_rate is not None:
             return nominal_bit_rate
-        return self._get_video_attribute('bit_rate')
+        video_bit_rate = self._get_video_attribute('bitrate')
+        if video_bit_rate is not None:
+            return video_bit_rate
+        overall_bitrate = self._get_general_attribute('overall_bit_rate')
+        return overall_bitrate
 
     @property
     def abitrate(self):
         maximum_bit_rate = self._get_audio_attribute('maximum_bit_rate')
         if maximum_bit_rate is not None:
             return maximum_bit_rate
-        return self._get_audio_attribute('bit_rate')
+        bit_rate = self._get_audio_attribute('bit_rate')
+        if bit_rate is not None:
+            return bit_rate
+        return 256000
+
+    @property
+    def aspect_ratio(self):
+        ratio = self._get_video_attribute('display_aspect_ratio')
+        return float(ratio)
 
 
 class Convert:
@@ -131,7 +144,7 @@ class Convert:
     @property
     def boilerplate(self):
         return (f"-c:a aac -b:a {self.file.abitrate} -f hls "
-                f"-master_pl_name {self.master_pl_path} "
+                f"-master_pl_name '{self.master_pl_path}' -hls_list_size 0 "
                 f"-hls_segment_filename '{self._conversion_dir}"
                 f"{self.file.name}_%v_%03d.ts'"
                )
@@ -150,29 +163,25 @@ class Convert:
         variant_stream_bitrates = []
         stream_map = []
         var_stream_map = []
+        for variant in self.valid_variants:
+            variant_stream_bitrates.append(variant.stream_bitrate(var_num))
+            var_stream_map.append(variant.stream_map(var_num))
+            stream_map.append(variant.map())
+            var_num += 1
+        return (f'{str(" ".join(variant_stream_bitrates))} {str(" ".join(stream_map))} '
+                f'-var_stream_map "{str(" ".join(var_stream_map))}" '
+                f'{self.boilerplate}'
+               )
+    
+    @property
+    def valid_variants(self):
+        valid_variants = []
         conversion_schema = self.conversion_types[self.schema]
         for variant in conversion_schema:
-            height = conversion_schema[variant]['height']
-            bitrate = conversion_schema[variant]['bitrate']
-            if (height <= self.file.height) and (
-                    bitrate <= self.file.vbitrate):
-                this_stream_bitrate = (
-                    f"-b:v:{var_num} {bitrate} -s:v:{var_num} "
-                    f"{int(height * 1.77777777777777777777777777777)}"
-                    f"x{height} -c:v:{var_num} libx264"
-                    )
-                this_stream_map = f"v:{var_num},a:{var_num},name:{variant}"
-                this_map = f"-map 0:v -map 0:a"
-                variant_stream_bitrates.append(this_stream_bitrate)
-                var_stream_map.append(this_stream_map)
-                stream_map.append(this_map)
-                var_num += 1
-        variant_bitrate_str = ' '.join(variant_stream_bitrates)
-        variant_map_str = ' '.join(var_stream_map)
-        stream_map_str = ' '.join(stream_map)
-        return (f'{variant_bitrate_str} {stream_map_str} '
-                f'-var_stream_map "{variant_map_str}" {self.boilerplate}'
-               )
+            variant = Variant(self.file, variant, conversion_schema[variant], self._conversion_dir)
+            if variant.is_valid:
+                valid_variants.append(variant)
+        return valid_variants
 
     def single_version(self):
         ffmpeg = FFmpeg(inputs={str(self.file.path): None},
@@ -182,11 +191,77 @@ class Convert:
         return True
 
     def multi_version(self):
+        self.multi_version_ffmpeg()
+        for variant in self.valid_variants:
+            variant.move_to_own_folder()
+            variant.edit_master_pl(self.master_pl_path)
+
+    def multi_version_ffmpeg(self):
         ffmpeg = FFmpeg(inputs={str(self.file.path): None},
                         outputs={self.multi_output_path: self.multi_output}
                        )
         ffmpeg.run()
-        return True
+
+
+class Variant:
+    def __init__(self, file, variant, info, conversion_dir):
+        self.file = file
+        self.name = variant
+        self.height = info['height']
+        self.bitrate = info['bitrate']
+        self.conversion_dir = conversion_dir
+        self.folder = f'{self.conversion_dir}/{self.name}'
+
+    @property
+    def width(self):
+        width = int(int(self.height) * self.file.aspect_ratio)
+        if width % 2 == 0:
+            return width
+        return width + 1
+
+    @property
+    def is_valid(self):
+        return (self.height <= self.file.height) and (
+            self.bitrate <= self.file.vbitrate)
+
+    def stream_bitrate(self, var_num):
+        return (f"-b:v:{var_num} {self.bitrate} -s:v:{var_num} "
+                f"{self.width}x{self.height} -c:v:{var_num} libx264")
+
+    def stream_map(self, var_num):
+        return f"v:{var_num},a:{var_num},name:{self.name}"
+
+    def map(self):
+        return f"-map 0:v -map 0:a"
+
+    def move_to_own_folder(self):
+        if not os.path.isdir(self.folder):
+            os.mkdir(self.folder)
+        files = self.get_files()
+        for file in files:
+            os.rename(file, f'{self.folder}/{os.path.basename(file)}')
+
+    def get_files(self):
+        files = []
+        for file in faster_than_walk.walk(str(self.conversion_dir)):
+            if file.endswith('ts'):
+                if f'_{self.name}_' in os.path.basename(file):
+                    files.append(file)
+            elif file.endswith('m3u8'):
+                if f'_{self.name}' in os.path.basename(file):
+                    files.append(file)
+        return files
+
+    def edit_master_pl(self, master_pl_path):
+        with open(f'{self.conversion_dir}/{master_pl_path}', 'r+') as master_pl:
+            content = master_pl.read()
+            old_path = f'{self.file.name}_{self.name}.m3u8'
+            new_path = f'{self.name}/{self.file.name}_{self.name}.m3u8'
+            content = content.replace(old_path, new_path)
+            master_pl.seek(0)
+            master_pl.write(content)
+            master_pl.truncate()
+
 
 class Directory:
     def __init__(self, path):
@@ -233,7 +308,8 @@ def main():
     parser.add_argument('-n', '--no-convert', action='store_true',
                         help='''Do not scale or convert video at all.''')
     parser.add_argument('-l', '--variant_ladder', nargs='?',
-                        help='''Built variant ladder to use. Defaults to Apple.''')
+                        help='''Built variant ladder to use. 
+                        Defaults to Apple.''')
     args = parser.parse_args()
     path = FilePath(args.path)
     if args.variant_ladder is None:
@@ -241,11 +317,13 @@ def main():
     if path.is_dir and path.exists and args.recursive:
         directory = Directory(path.absolute)
         for file in directory.files:
-            Convert(file, single=args.single_version, schema=args.variant_ladder)
+            Convert(file, single=args.single_version, 
+                    schema=args.variant_ladder)
     elif path.is_file and path.exists:
         file = File(path.absolute)
         if file.is_a_video_file:
-            Convert(file, single=args.single_version, schema=args.variant_ladder)
+            Convert(file, single=args.single_version,
+                    schema=args.variant_ladder)
         else:
             print('This isn\'t a supported video type.')
     else:
