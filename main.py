@@ -6,7 +6,6 @@ from ffmpy import FFmpeg
 from pymediainfo import MediaInfo
 
 class File:
-
     def __init__(self, path):
         self.path = path
         self.basename = os.path.basename(self.path)
@@ -79,7 +78,6 @@ class File:
 
 
 class Convert:
-
     # Based on: https://developer.roku.com/docs/specs/streaming.md#best-practices
     roku = {'1080_h': {'height': 1080, 'bitrate': 5800000},
             '1080_l': {'height': 1080, 'bitrate': 4300000},
@@ -168,10 +166,12 @@ class Convert:
             var_stream_map.append(variant.stream_map(var_num))
             stream_map.append(variant.map())
             var_num += 1
-        return (f'{str(" ".join(variant_stream_bitrates))} {str(" ".join(stream_map))} '
-                f'-var_stream_map "{str(" ".join(var_stream_map))}" '
-                f'{self.boilerplate}'
-               )
+        return (
+            f'{str(" ".join(variant_stream_bitrates))} '
+            f'{str(" ".join(stream_map))} '
+            f'-var_stream_map "{str(" ".join(var_stream_map))}" '
+            f'{self.boilerplate}'
+        ) 
     
     @property
     def valid_variants(self):
